@@ -2,6 +2,8 @@ package search
 
 import (
 	"context"
+	"io/ioutil"
+	"log"
 	"strings"
 	"sync"
 )
@@ -13,36 +15,109 @@ type Result struct {
 	ColNum  int64
 }
 
-func All(ctx context.Context, phrase string, files []string) <-chan []Result {
-	ch := make(chan []Result)
+func Any(root context.Context, phrase string, files []string) <-chan Result {
+	ch := make(chan Result)
 	wg := sync.WaitGroup{}
-	var result []Result
-	for i, file := range files {
+	ctx, cancel := context.WithCancel(root)
+	for i, filePath := range files {
 		wg.Add(1)
-		go func(ctx context.Context, file string, ch chan<- []Result, index int) {
+		go func(ctx context.Context, filePath string, ch chan Result, index int) {
 			defer wg.Done()
-			splited := strings.Split(file, "\n")
-			for _, row := range splited {
-				if row == "" {
-					continue
-				}
-				if strings.Contains(row, phrase) {
-					result = append(result, Result{
-						Phrase:  phrase,
-						Line:    row,
-						LineNum: int64(index) + 1,
-						ColNum:  int64(strings.Index(file, phrase)),
-					})
+			result := FindAnyMatchesTextInFile(phrase, filePath)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if result != nil {
+					cancel()
+					ch <- *result
 				}
 			}
-		}(ctx, file, ch, i)
+		}(ctx, filePath, ch, i)
+	}
+
+	go func() {
+		wg.Wait()
+		cancel()
+		close(ch)
+	}()
+
+	return ch
+}
+
+func FindAnyMatchesTextInFile(phrase, fileName string) (res *Result) {
+	data, err := ioutil.ReadFile(fileName)
+	if err != nil {
+		log.Println("error", err)
+		return
+	}
+
+	file := string(data)
+
+	splited := strings.Split(file, "\n")
+	for i, line := range splited {
+		if strings.Contains(line, phrase) {
+			res = &Result{
+				Phrase:  phrase,
+				Line:    line,
+				LineNum: int64(i + 1),
+				ColNum:  int64(strings.Index(line, phrase)) + 1,
+			}
+			return
+		}
+	}
+	return
+}
+
+func All(root context.Context, phrase string, files []string) <-chan []Result {
+	ch := make(chan []Result)
+	wg := sync.WaitGroup{}
+	ctx, cancel := context.WithCancel(root)
+	for i, filePath := range files {
+		wg.Add(1)
+		go func(ctx context.Context, filePath string, ch chan<- []Result, index int) {
+			defer wg.Done()
+			result := FindAllMatchesTextInFile(phrase, filePath)
+			if len(result) > 0 {
+				ch <- result
+			}
+		}(ctx, filePath, ch, i)
 	}
 
 	go func() {
 		defer close(ch)
 		wg.Wait()
-		ch <- result
 	}()
 
+	cancel()
 	return ch
+}
+
+func FindAllMatchesTextInFile(phrase, fileName string) (res []Result) {
+
+	data, err := ioutil.ReadFile(fileName)
+	if err != nil {
+		log.Println("error", err)
+		return res
+	}
+
+	file := string(data)
+
+	splited := strings.Split(file, "\n")
+
+	for i, line := range splited {
+		if strings.Contains(line, phrase) {
+
+			r := Result{
+				Phrase:  phrase,
+				Line:    line,
+				LineNum: int64(i + 1),
+				ColNum:  int64(strings.Index(line, phrase)) + 1,
+			}
+
+			res = append(res, r)
+		}
+	}
+
+	return res
 }
